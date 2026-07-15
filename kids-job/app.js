@@ -546,8 +546,12 @@ function App() {
   const [view, setView] = useState("home");
   const [active, setActive] = useState(0);
   const isLocalChange = useRef(false);
+  const lastWritten = useRef(null); // 自分が書き込んだ内容（エコー判定用）
+
   useEffect(() => {
     const unsub = watchData(remote => {
+      const json = JSON.stringify(remote);
+      if (json === lastWritten.current) return; // 自分の書き込みのエコーは無視（無限ループ防止）
       isLocalChange.current = false;
       setData(migrate(remote));
       setLoading(false);
@@ -555,7 +559,10 @@ function App() {
     return () => unsub();
   }, []);
   useEffect(() => {
-    if (!loading && isLocalChange.current) saveData(data);
+    if (!loading && isLocalChange.current) {
+      lastWritten.current = JSON.stringify(data);
+      saveData(data);
+    }
   }, [data, loading]);
   const update = fn => {
     isLocalChange.current = true;
