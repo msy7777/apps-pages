@@ -605,8 +605,7 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: 1,
-      overflowY: "auto"
+      flex: 1
     }
   }, view === "home" && /*#__PURE__*/React.createElement(HomeView, {
     data: data,
@@ -2298,6 +2297,8 @@ function TabBar({
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
+      position: "sticky",
+      bottom: 0,
       borderTop: `1px solid ${COLORS.line}`,
       background: "rgba(255,255,255,0.92)",
       backdropFilter: "blur(12px)",
@@ -2338,7 +2339,7 @@ function TabBar({
 const page = {
   display: "flex",
   flexDirection: "column",
-  height: "100%",
+  minHeight: "100dvh",
   maxWidth: 520,
   margin: "0 auto",
   background: COLORS.bg,
