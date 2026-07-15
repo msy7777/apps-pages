@@ -397,9 +397,15 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const familyDocRef = db.collection("families").doc("our-family");
 
-/* データの変更を監視し、変わるたびに onChange(data) を呼ぶ。戻り値は監視解除用の関数。 */
+/* データの変更を監視し、変わるたびに onChange(data) を呼ぶ。戻り値は監視解除用の関数。
+   includeMetadataChanges + hasPendingWrites で「自分がまだFirestoreに書き込み中の内容」を
+   確実に無視する（文字列比較による従来方式は、連続入力で書き込みが重なると
+   古い内容が後から届いて入力中の内容を上書きしてしまうことがあった）。 */
 function watchData(onChange) {
-  return familyDocRef.onSnapshot(snap => {
+  return familyDocRef.onSnapshot({
+    includeMetadataChanges: true
+  }, snap => {
+    if (snap.metadata.hasPendingWrites) return;
     if (snap.exists) {
       onChange(snap.data());
     } else {
@@ -443,6 +449,20 @@ function migrate(d) {
     });
     delete d.chorePrice;
   }
+  /* お手伝いリストを子供共通(配列)→子供ごと(オブジェクト)へ移行。
+     既存の内容はそのまま各子供にコピーする（移行時点では差はない）。 */
+  Object.keys(d.monthChores).forEach(mk => {
+    if (Array.isArray(d.monthChores[mk])) {
+      const shared = d.monthChores[mk];
+      const perChild = {};
+      (d.children || []).forEach(c => {
+        perChild[c.id] = shared.map(x => ({
+          ...x
+        }));
+      });
+      d.monthChores[mk] = perChild;
+    }
+  });
   // ボーナス枠の初期化
   const isLegacyData = !d.bonuses && !d.monthBonuses; /* ボーナス機能導入前の古いデータか */
   if (!d.settlement) d.settlement = defaultSettlement();
@@ -478,15 +498,16 @@ function migrate(d) {
 
 /* ---------- 集計ロジック ---------- */
 
-/* その月のお手伝いリスト：月別リストのみ（未セットなら空。
+/* その月・その子供のお手伝いリスト：月別×子供別リストのみ（未セットなら空。
    「お手伝いセット」で設定の既定値を挿入する方式） */
-const choresFor = (data, mk) => data.monthChores?.[mk] || [];
+const choresFor = (data, mk, childId) => data.monthChores?.[mk]?.[childId] || [];
 
-/* 月別リストの器を用意（空で作成。既定値は自動では入らない） */
-const ensureMonthChores = (d, mk) => {
+/* 月別×子供別リストの器を用意（空で作成。既定値は自動では入らない） */
+const ensureMonthChores = (d, mk, childId) => {
   if (!d.monthChores) d.monthChores = {};
-  if (!d.monthChores[mk]) d.monthChores[mk] = [];
-  return d.monthChores[mk];
+  if (!d.monthChores[mk]) d.monthChores[mk] = {};
+  if (!d.monthChores[mk][childId]) d.monthChores[mk][childId] = [];
+  return d.monthChores[mk][childId];
 };
 
 /* その月のボーナス枠（未セットなら空） */
@@ -497,7 +518,7 @@ const bonusName = (data, mk, slot) => (data.monthBonuses?.[mk] || []).find(b => 
 const entryOf = (data, childId, k) => (data.logs[childId] || {})[k] || emptyEntry();
 const dayTotal = (data, childId, k) => {
   const e = entryOf(data, childId, k);
-  const chores = choresFor(data, monthKeyOf(k));
+  const chores = choresFor(data, monthKeyOf(k), childId);
   const amt = id => {
     const c = chores.find(x => x.id === id);
     return c ? Number(c.amount) || 0 : 0;
@@ -509,7 +530,7 @@ const dayTotal = (data, childId, k) => {
 const monthSummary = (data, childId, mk) => {
   const logs = data.logs[childId] || {};
   const keys = Object.keys(logs).filter(k => monthKeyOf(k) === mk);
-  const items = choresFor(data, mk).map(c => ({
+  const items = choresFor(data, mk, childId).map(c => ({
     name: c.name,
     amount: Number(c.amount) || 0,
     count: keys.filter(k => (logs[k].chores || []).includes(c.id)).length
@@ -546,12 +567,8 @@ function App() {
   const [view, setView] = useState("home");
   const [active, setActive] = useState(0);
   const isLocalChange = useRef(false);
-  const lastWritten = useRef(null); // 自分が書き込んだ内容（エコー判定用）
-
   useEffect(() => {
     const unsub = watchData(remote => {
-      const json = JSON.stringify(remote);
-      if (json === lastWritten.current) return; // 自分の書き込みのエコーは無視（無限ループ防止）
       isLocalChange.current = false;
       setData(migrate(remote));
       setLoading(false);
@@ -560,7 +577,6 @@ function App() {
   }, []);
   useEffect(() => {
     if (!loading && isLocalChange.current) {
-      lastWritten.current = JSON.stringify(data);
       saveData(data);
     }
   }, [data, loading]);
@@ -648,10 +664,10 @@ function HomeView({
   const logs = data.logs[child.id] || {};
   const [choreEditOpen, setChoreEditOpen] = useState(false);
   const [bonusPick, setBonusPick] = useState(null); /* { k, field } */
-  const chores = choresFor(data, mk);
+  const chores = choresFor(data, mk, child.id);
   const monthBs = bonusesFor(data, mk);
   const toggleChore = (k, choreId) => update(d => {
-    ensureMonthChores(d, monthKeyOf(k));
+    ensureMonthChores(d, monthKeyOf(k), child.id);
     const byDate = d.logs[child.id] || (d.logs[child.id] = {});
     const e = byDate[k] || (byDate[k] = emptyEntry());
     const i = e.chores.indexOf(choreId);
@@ -660,7 +676,7 @@ function HomeView({
     return d;
   });
   const setBonus = (k, field, val) => update(d => {
-    ensureMonthChores(d, monthKeyOf(k));
+    ensureMonthChores(d, monthKeyOf(k), child.id);
     const byDate = d.logs[child.id] || (d.logs[child.id] = {});
     const e = byDate[k] || (byDate[k] = emptyEntry());
     e[field] = Math.max(0, parseInt(val, 10) || 0);
@@ -677,7 +693,7 @@ function HomeView({
 
   /* 設定の既定値（お手伝い＋ボーナス枠）をこの月に挿入（重複はスキップ） */
   const insertDefaultChores = () => update(d => {
-    const list = ensureMonthChores(d, mk);
+    const list = ensureMonthChores(d, mk, child.id);
     const existing = new Set(list.map(c => c.id));
     d.chores.forEach(c => {
       if (c.name && c.name.trim() && !existing.has(c.id)) list.push(clone(c));
@@ -695,15 +711,15 @@ function HomeView({
     return d;
   });
 
-  /* この月のお手伝いリストの編集（設定の既定値・他の月には影響しない） */
+  /* この月・この子供のお手伝いリストの編集（設定の既定値・他の月/他の子供には影響しない） */
   const editMonthChore = (choreId, field, val) => update(d => {
-    const list = ensureMonthChores(d, mk);
+    const list = ensureMonthChores(d, mk, child.id);
     const c = list.find(x => x.id === choreId);
     if (c) c[field] = field === "amount" ? Math.max(0, parseInt(val, 10) || 0) : val;
     return d;
   });
   const addMonthChore = (nm, amt) => update(d => {
-    const list = ensureMonthChores(d, mk);
+    const list = ensureMonthChores(d, mk, child.id);
     list.push({
       id: uid(),
       name: nm,
@@ -712,20 +728,19 @@ function HomeView({
     return d;
   });
   const removeMonthChore = choreId => update(d => {
-    const list = ensureMonthChores(d, mk);
-    d.monthChores[mk] = list.filter(c => c.id !== choreId);
-    /* この月の記録からも該当お手伝いのチェックを削除 */
-    Object.values(d.logs).forEach(byDate => {
-      Object.keys(byDate).filter(k => monthKeyOf(k) === mk).forEach(k => {
-        byDate[k].chores = (byDate[k].chores || []).filter(x => x !== choreId);
-        if (entryIsEmpty(byDate[k])) delete byDate[k];
-      });
+    const list = ensureMonthChores(d, mk, child.id);
+    d.monthChores[mk][child.id] = list.filter(c => c.id !== choreId);
+    /* この月・この子供の記録からも該当お手伝いのチェックを削除 */
+    const byDate = d.logs[child.id] || {};
+    Object.keys(byDate).filter(k => monthKeyOf(k) === mk).forEach(k => {
+      byDate[k].chores = (byDate[k].chores || []).filter(x => x !== choreId);
+      if (entryIsEmpty(byDate[k])) delete byDate[k];
     });
     return d;
   });
   const reorderMonthChores = newArr => update(d => {
-    ensureMonthChores(d, mk);
-    d.monthChores[mk] = newArr;
+    ensureMonthChores(d, mk, child.id);
+    d.monthChores[mk][child.id] = newArr;
     return d;
   });
 
@@ -1090,6 +1105,7 @@ function HomeView({
     chores: chores,
     bonuses: monthBs,
     mk: mk,
+    childName: childLabel(child),
     color: child.color,
     onEdit: editMonthChore,
     onAdd: addMonthChore,
@@ -1108,6 +1124,7 @@ function ChoreEditModal({
   chores,
   bonuses,
   mk,
+  childName,
   color,
   onEdit,
   onAdd,
@@ -1166,7 +1183,7 @@ function ChoreEditModal({
       fontWeight: 800,
       color: COLORS.ink
     }
-  }, monthLabelOf(mk), "\u306E\u304A\u624B\u4F1D\u3044"), /*#__PURE__*/React.createElement("button", {
+  }, monthLabelOf(mk), "\u306E\u304A\u624B\u4F1D\u3044\uFF08", childName, "\uFF09"), /*#__PURE__*/React.createElement("button", {
     onClick: onClose,
     style: {
       marginLeft: "auto",
@@ -1186,7 +1203,7 @@ function ChoreEditModal({
       margin: "0 2px 12px",
       lineHeight: 1.6
     }
-  }, "\u3053\u306E\u6708\u3060\u3051\u306E\u5185\u5BB9\u3067\u3059\u3002\u4ED6\u306E\u6708\u3084\u8A2D\u5B9A\u306E\u65E2\u5B9A\u5024\u306B\u306F\u5F71\u97FF\u3057\u307E\u305B\u3093\u3002\u524A\u9664\u3059\u308B\u3068\u3001\u3053\u306E\u6708\u306E\u30C1\u30A7\u30C3\u30AF\u3084\u5165\u529B\u91D1\u984D\u3082\u6D88\u3048\u307E\u3059\u3002"), /*#__PURE__*/React.createElement("div", {
+  }, "\u304A\u624B\u4F1D\u3044\u9805\u76EE\u306F\u3053\u306E\u6708\u30FB\u3053\u306E\u5B50\u4F9B\u3060\u3051\u306E\u5185\u5BB9\u3067\u3059\uFF08\u30DC\u30FC\u30CA\u30B9\u67A0\u306F\u5B50\u4F9B\u5171\u901A\uFF09\u3002\u4ED6\u306E\u6708\u30FB\u4ED6\u306E\u5B50\u4F9B\u30FB\u8A2D\u5B9A\u306E\u65E2\u5B9A\u5024\u306B\u306F\u5F71\u97FF\u3057\u307E\u305B\u3093\u3002\u524A\u9664\u3059\u308B\u3068\u3001\u3053\u306E\u6708\u306E\u30C1\u30A7\u30C3\u30AF\u3084\u5165\u529B\u91D1\u984D\u3082\u6D88\u3048\u307E\u3059\u3002"), /*#__PURE__*/React.createElement("div", {
     style: {
       ...card,
       padding: 0,
@@ -1854,68 +1871,9 @@ function SettingsView({
     d.children = d.children.filter(c => c.id !== cid);
     delete d.logs[cid];
     if (d.basePay) delete d.basePay[cid];
+    Object.values(d.monthChores || {}).forEach(byChild => delete byChild[cid]);
     return d;
   });
-
-  /* ---- バックアップ ---- */
-  const [ioMsg, setIoMsg] = useState("");
-  const exportData = async () => {
-    const json = JSON.stringify(data, null, 2);
-    const fileName = `otetsudai-backup-${todayKey()}.json`;
-    const blob = new Blob([json], {
-      type: "application/json"
-    });
-    try {
-      const file = new File([blob], fileName, {
-        type: "application/json"
-      });
-      if (navigator.canShare && navigator.canShare({
-        files: [file]
-      })) {
-        await navigator.share({
-          files: [file],
-          title: "お手伝い記録バックアップ"
-        });
-        setIoMsg("書き出しました");
-        return;
-      }
-    } catch (e) {
-      if (e && e.name === "AbortError") return; /* 共有キャンセル */
-    }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setIoMsg("書き出しました");
-  };
-  const importData = ev => {
-    const f = ev.target.files && ev.target.files[0];
-    ev.target.value = "";
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const d = JSON.parse(reader.result);
-        if (!d || !Array.isArray(d.children) || !Array.isArray(d.chores)) throw new Error("invalid");
-        if (!d.logs) d.logs = {};
-        if (!d.basePay) d.basePay = {};
-        if (!d.monthChores) d.monthChores = {};
-        d.children.forEach(c => {
-          if (!d.logs[c.id]) d.logs[c.id] = {};
-          if (!d.basePay[c.id]) d.basePay[c.id] = {};
-        });
-        update(() => d);
-        setIoMsg("読み込みました。データを復元しました");
-      } catch (e) {
-        setIoMsg("読み込めませんでした。バックアップファイルか確認してください");
-      }
-    };
-    reader.readAsText(f);
-  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "16px 16px 28px"
@@ -2261,75 +2219,14 @@ function SettingsView({
       margin: "-14px 4px 22px",
       lineHeight: 1.7
     }
-  }, "\u203B \u30C1\u30A7\u30C3\u30AF\u3057\u305F\u9805\u76EE\u306E\u5408\u8A08\u304C\u3001\u5C65\u6B74\u3067\u305D\u306E\u4EBA\u306E\u6E05\u7B97\u984D\u3068\u3057\u3066\u8868\u793A\u3055\u308C\u307E\u3059\u3002\u9805\u76EE\u306F1\u4EBA\u306B\u3060\u3051\u632F\u308A\u5206\u3051\u3089\u308C\u307E\u3059\u3002"), /*#__PURE__*/React.createElement(Label, null, "\u30C7\u30FC\u30BF\u306E\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...card,
-      padding: 16,
-      marginBottom: 22
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "0 0 12px",
-      fontSize: 12,
-      color: COLORS.sub,
-      lineHeight: 1.7
-    }
-  }, "\u5168\u30C7\u30FC\u30BF\u3092\u30D5\u30A1\u30A4\u30EB\u306B\u66F8\u304D\u51FA\u3057\u307E\u3059\u3002iPhone\u3067\u306F\u5171\u6709\u30B7\u30FC\u30C8\u304B\u3089 Google Drive \u3084\u300C\u30D5\u30A1\u30A4\u30EB\u300D\u306B\u4FDD\u5B58\u3067\u304D\u307E\u3059\u3002\u5FA9\u5143\u306F\u66F8\u304D\u51FA\u3057\u305F\u30D5\u30A1\u30A4\u30EB\u3092\u8AAD\u307F\u8FBC\u3080\u3060\u3051\u3067\u3059\u3002"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: exportData,
-    style: {
-      flex: 1,
-      border: "none",
-      borderRadius: 12,
-      background: COLORS.blue,
-      color: "#fff",
-      fontSize: 15,
-      fontWeight: 700,
-      padding: "12px 0",
-      cursor: "pointer",
-      fontFamily: FONT
-    }
-  }, "\u66F8\u304D\u51FA\u3059"), /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      borderRadius: 12,
-      border: `1.5px solid ${COLORS.blue}`,
-      color: COLORS.blue,
-      fontSize: 15,
-      fontWeight: 700,
-      padding: "12px 0",
-      cursor: "pointer",
-      fontFamily: FONT,
-      textAlign: "center",
-      background: "#fff",
-      boxSizing: "border-box"
-    }
-  }, "\u8AAD\u307F\u8FBC\u3080", /*#__PURE__*/React.createElement("input", {
-    type: "file",
-    accept: ".json,application/json",
-    onChange: importData,
-    style: {
-      display: "none"
-    }
-  }))), ioMsg && /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "10px 0 0",
-      fontSize: 12,
-      fontWeight: 700,
-      color: COLORS.ink
-    }
-  }, ioMsg)), /*#__PURE__*/React.createElement("p", {
+  }, "\u203B \u30C1\u30A7\u30C3\u30AF\u3057\u305F\u9805\u76EE\u306E\u5408\u8A08\u304C\u3001\u5C65\u6B74\u3067\u305D\u306E\u4EBA\u306E\u6E05\u7B97\u984D\u3068\u3057\u3066\u8868\u793A\u3055\u308C\u307E\u3059\u3002\u9805\u76EE\u306F1\u4EBA\u306B\u3060\u3051\u632F\u308A\u5206\u3051\u3089\u308C\u307E\u3059\u3002"), /*#__PURE__*/React.createElement("p", {
     style: {
       fontSize: 12,
       color: COLORS.sub,
       margin: "0 4px",
       lineHeight: 1.7
     }
-  }, "\u203B \u3053\u3053\u306E\u304A\u624B\u4F1D\u3044\u3068\u30DC\u30FC\u30CA\u30B9\u67A0\u306F\u81EA\u52D5\u3067\u306F\u6708\u306B\u5165\u308A\u307E\u305B\u3093\u3002\u300C\u304A\u624B\u4F1D\u3044\u300D\u753B\u9762\u306E\u300C\u304A\u624B\u4F1D\u3044\u30BB\u30C3\u30C8\u300D\u30DC\u30BF\u30F3\u3092\u62BC\u3057\u305F\u3068\u304D\u306B\u3001\u305D\u306E\u6708\u3078\u633F\u5165\u3055\u308C\u307E\u3059\u3002", /*#__PURE__*/React.createElement("br", null), "\u203B \u633F\u5165\u5F8C\u306F\u6708\u3054\u3068\u306B\u72EC\u7ACB\u3059\u308B\u305F\u3081\u3001\u3053\u3053\u3067\u8FFD\u52A0\u30FB\u524A\u9664\u30FB\u5909\u66F4\u3057\u3066\u3082\u5404\u6708\u306B\u306F\u5F71\u97FF\u3057\u307E\u305B\u3093\u3002", /*#__PURE__*/React.createElement("br", null), "\u203B \u7279\u5B9A\u306E\u6708\u3060\u3051\u5185\u5BB9\u3092\u5909\u3048\u305F\u3044\u5834\u5408\u306F\u300C\u304A\u624B\u4F1D\u3044\u3092\u7DE8\u96C6\u300D\u304B\u3089\u3001\u57FA\u672C\u7D66\u306F\u4E0A\u90E8\u30AB\u30FC\u30C9\u3067\u6708\u3054\u3068\u306B\u5165\u529B\u3057\u307E\u3059\u3002"));
+  }, "\u203B \u3053\u3053\u306E\u304A\u624B\u4F1D\u3044\u3068\u30DC\u30FC\u30CA\u30B9\u67A0\u306F\u81EA\u52D5\u3067\u306F\u6708\u306B\u5165\u308A\u307E\u305B\u3093\u3002\u300C\u304A\u624B\u4F1D\u3044\u300D\u753B\u9762\u306E\u300C\u304A\u624B\u4F1D\u3044\u30BB\u30C3\u30C8\u300D\u30DC\u30BF\u30F3\u3092\u62BC\u3057\u305F\u3068\u304D\u306B\u3001\u305D\u306E\u6708\uFF08\u304A\u624B\u4F1D\u3044\u306F\u305D\u306E\u6642\u898B\u3066\u3044\u308B\u5B50\u4F9B\uFF09\u3078\u633F\u5165\u3055\u308C\u307E\u3059\u3002", /*#__PURE__*/React.createElement("br", null), "\u203B \u633F\u5165\u5F8C\u306F\u6708\u30FB\u5B50\u4F9B\u3054\u3068\u306B\u72EC\u7ACB\u3059\u308B\u305F\u3081\uFF08\u30DC\u30FC\u30CA\u30B9\u67A0\u306F\u5B50\u4F9B\u5171\u901A\uFF09\u3001\u3053\u3053\u3067\u8FFD\u52A0\u30FB\u524A\u9664\u30FB\u5909\u66F4\u3057\u3066\u3082\u5404\u6708\u306B\u306F\u5F71\u97FF\u3057\u307E\u305B\u3093\u3002", /*#__PURE__*/React.createElement("br", null), "\u203B \u7279\u5B9A\u306E\u6708\u3060\u3051\u5185\u5BB9\u3092\u5909\u3048\u305F\u3044\u5834\u5408\u306F\u300C\u304A\u624B\u4F1D\u3044\u3092\u7DE8\u96C6\u300D\u304B\u3089\u3001\u57FA\u672C\u7D66\u306F\u4E0A\u90E8\u30AB\u30FC\u30C9\u3067\u6708\u3054\u3068\u306B\u5165\u529B\u3057\u307E\u3059\u3002"));
 }
 
 /* ---------- 共通パーツ ---------- */
