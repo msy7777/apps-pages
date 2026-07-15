@@ -515,6 +515,9 @@ const bonusesFor = (data, mk) => data.monthBonuses?.[mk] || [];
 
 /* ボーナス枠の表示名：月のスナップショット → 設定の既定値 → 初期名 */
 const bonusName = (data, mk, slot) => (data.monthBonuses?.[mk] || []).find(b => b.id === slot)?.name || (data.bonuses || []).find(b => b.id === slot)?.name || slotDefaultName(slot);
+
+/* その月・そのボーナス枠に、いずれかの子供の金額が既に入力されているか（設定変更を反映してよいかの判定に使う） */
+const isBonusUsedInMonth = (d, mk, slotId) => Object.values(d.logs || {}).some(byDate => Object.keys(byDate).filter(k => monthKeyOf(k) === mk).some(k => Number(byDate[k][slotId]) > 0));
 const entryOf = (data, childId, k) => (data.logs[childId] || {})[k] || emptyEntry();
 const dayTotal = (data, childId, k) => {
   const e = entryOf(data, childId, k);
@@ -1802,6 +1805,11 @@ function SettingsView({
   const editBonus = (id, val) => update(d => {
     const b = (d.bonuses || []).find(x => x.id === id);
     if (b) b.name = val;
+    /* まだ金額が入力されていない（未使用の）月のボーナス枠には、新しい名前をその場で反映する */
+    Object.entries(d.monthBonuses || {}).forEach(([mk, list]) => {
+      const entry = (list || []).find(x => x.id === id);
+      if (entry && !isBonusUsedInMonth(d, mk, id)) entry.name = val;
+    });
     return d;
   });
   const removeBonus = id => update(d => {
