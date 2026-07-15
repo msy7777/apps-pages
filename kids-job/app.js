@@ -1599,7 +1599,6 @@ function HistoryView({
       child: c,
       sum: monthSummary(data, c.id, mk)
     }));
-    const grand = totals.reduce((s, t) => s + t.sum.total, 0);
     return /*#__PURE__*/React.createElement("div", {
       key: mk,
       style: {
@@ -1638,12 +1637,27 @@ function HistoryView({
       }
     }, "\u4ECA\u6708")), /*#__PURE__*/React.createElement("span", {
       style: {
-        fontSize: 13,
-        color: COLORS.sub
+        display: "flex",
+        gap: 10
       }
-    }, "\u5408\u8A08 ", /*#__PURE__*/React.createElement(Yen, {
-      n: grand
-    }))), isOpen && /*#__PURE__*/React.createElement("div", {
+    }, totals.map(({
+      child,
+      sum
+    }) => /*#__PURE__*/React.createElement("span", {
+      key: child.id,
+      style: {
+        fontSize: 13,
+        color: COLORS.sub,
+        whiteSpace: "nowrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 700,
+        color: child.color
+      }
+    }, childLabel(child)), " ", /*#__PURE__*/React.createElement(Yen, {
+      n: sum.total
+    }))))), isOpen && /*#__PURE__*/React.createElement("div", {
       style: {
         borderTop: `1px solid ${COLORS.line}`,
         padding: "4px 16px 12px"
