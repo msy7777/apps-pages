@@ -1,4 +1,4 @@
-const CACHE = "kids-job-v25";
+const CACHE = "kids-job-v26";
 const ASSETS = [
   "./",
   "./index.html",
